@@ -72,8 +72,7 @@ impl Transport {
         idle_browser_timeout: Duration,
     ) -> Fallible<Self> {
         let (messages_tx, messages_rx) = mpsc::channel();
-        let web_socket_connection =
-            Arc::new(WebSocketConnection::new(&ws_url, process_id, messages_tx)?);
+        let web_socket_connection = WebSocketConnection::new(&ws_url, process_id, messages_tx)?;
 
         let waiting_call_registry = Arc::new(WaitingCallRegistry::new());
 

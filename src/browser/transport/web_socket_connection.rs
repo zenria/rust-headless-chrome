@@ -1,17 +1,19 @@
-use std::sync::mpsc;
 use std::sync::Mutex;
+use std::sync::{mpsc, Arc};
 
 use failure::Fallible;
 use log::*;
 use websocket::client::sync::Client;
 use websocket::stream::sync::TcpStream;
+use websocket::sync::Reader;
 use websocket::WebSocketError;
 use websocket::{ClientBuilder, OwnedMessage};
 
 use crate::protocol;
+use std::cell::Cell;
 
 pub struct WebSocketConnection {
-    sender: Mutex<websocket::sender::Writer<TcpStream>>,
+    sender: Mutex<Cell<websocket::sender::Writer<TcpStream>>>,
     process_id: Option<u32>,
 }
 
@@ -27,20 +29,34 @@ impl WebSocketConnection {
         ws_url: &str,
         process_id: Option<u32>,
         messages_tx: mpsc::Sender<protocol::Message>,
-    ) -> Fallible<Self> {
+    ) -> Fallible<Arc<Self>> {
         let connection = Self::websocket_connection(&ws_url)?;
         let (websocket_receiver, sender) = connection.split()?;
 
+        let ret = Arc::new(Self {
+            sender: Mutex::new(Cell::new(sender)),
+            process_id,
+        });
+
+        let ws_con = ret.clone();
+        let ws_url = String::from(ws_url);
         std::thread::spawn(move || {
             trace!("Starting msg dispatching loop");
-            Self::dispatch_incoming_messages(websocket_receiver, messages_tx, process_id);
+            ws_con.dispatch_incoming_messages(websocket_receiver, messages_tx, process_id, ws_url);
             trace!("Quit loop msg dispatching loop");
         });
 
-        Ok(Self {
-            sender: Mutex::new(sender),
-            process_id,
-        })
+        Ok(ret)
+    }
+
+    fn reconnect(&self, ws_url: &str) -> Fallible<Reader<TcpStream>> {
+        let connection = Self::websocket_connection(&ws_url)?;
+        let (websocket_receiver, websocker_sender) = connection.split()?;
+
+        let sender = self.sender.lock().unwrap();
+        sender.replace(websocker_sender);
+
+        Ok(websocket_receiver)
     }
 
     pub fn shutdown(&self) {
@@ -48,7 +64,8 @@ impl WebSocketConnection {
             "Shutting down WebSocket connection for Chrome {:?}",
             self.process_id
         );
-        if self.sender.lock().unwrap().shutdown_all().is_err() {
+        let mut sender = self.sender.lock().unwrap();
+        if sender.get_mut().shutdown_all().is_err() {
             debug!(
                 "Couldn't shut down WS connection for Chrome {:?}",
                 self.process_id
@@ -57,41 +74,58 @@ impl WebSocketConnection {
     }
 
     fn dispatch_incoming_messages(
-        mut receiver: websocket::receiver::Reader<TcpStream>,
+        &self,
+        receiver: websocket::receiver::Reader<TcpStream>,
         messages_tx: mpsc::Sender<protocol::Message>,
         process_id: Option<u32>,
+        ws_url: String,
     ) {
-        for ws_message in receiver.incoming_messages() {
-            match ws_message {
-                Err(error) => match error {
-                    WebSocketError::NoDataAvailable => {
-                        debug!("WS Error Chrome #{:?}: {}", process_id, error);
-                        break;
-                    }
-                    WebSocketError::IoError(err) => {
-                        debug!("WS IO Error for Chrome #{:?}: {}", process_id, err);
-                        break;
-                    }
-                    _ => panic!(
-                        "Unhandled WebSocket error for Chrome #{:?}: {:?}",
-                        process_id, error
-                    ),
-                },
-                Ok(message) => {
-                    if let OwnedMessage::Text(message_string) = message {
-                        if let Ok(message) = protocol::parse_raw_message(&message_string) {
-                            if messages_tx.send(message).is_err() {
-                                break;
+        let mut receiver = receiver;
+        loop {
+            for ws_message in receiver.incoming_messages() {
+                match ws_message {
+                    Err(error) => match error {
+                        WebSocketError::NoDataAvailable => {
+                            debug!("WS Error Chrome #{:?}: {}", process_id, error);
+                            break;
+                        }
+                        WebSocketError::IoError(err) => {
+                            debug!("WS IO Error for Chrome #{:?}: {}", process_id, err);
+                            break;
+                        }
+                        _ => panic!(
+                            "Unhandled WebSocket error for Chrome #{:?}: {:?}",
+                            process_id, error
+                        ),
+                    },
+                    Ok(message) => {
+                        if let OwnedMessage::Text(message_string) = message {
+                            if let Ok(message) = protocol::parse_raw_message(&message_string) {
+                                if messages_tx.send(message).is_err() {
+                                    break;
+                                }
+                            } else {
+                                trace!(
+                                    "Incoming message isn't recognised as event or method response: {}",
+                                    message_string
+                                );
                             }
                         } else {
-                            trace!(
-                                "Incoming message isn't recognised as event or method response: {}",
-                                message_string
-                            );
+                            panic!("Got a weird message: {:?}", message)
                         }
-                    } else {
-                        panic!("Got a weird message: {:?}", message)
                     }
+                }
+            }
+            warn!(
+                "WS connection dropped unexpectedly, trying to reconnect to {}",
+                ws_url
+            );
+            receiver = match self.reconnect(&ws_url) {
+                Ok(r) => r,
+                Err(e) => {
+                    // we may want to try more than one time...
+                    error!("Cannot reconnect to {}: {}", ws_url, e);
+                    break;
                 }
             }
         }
@@ -116,7 +150,7 @@ impl WebSocketConnection {
     pub fn send_message(&self, message_text: &str) -> Fallible<()> {
         let message = websocket::Message::text(message_text);
         let mut sender = self.sender.lock().unwrap();
-        sender.send_message(&message)?;
+        sender.get_mut().send_message(&message)?;
         Ok(())
     }
 }
