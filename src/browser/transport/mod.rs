@@ -239,23 +239,21 @@ impl Transport {
                     Err(TryRecvError::Empty) => {}
                 }
                 match messages_rx.recv_timeout(idle_browser_timeout) {
-                    Err(recv_timeout_error) => {
-                        match recv_timeout_error {
-                            RecvTimeoutError::Timeout => {
-                                error!(
+                    Err(recv_timeout_error) => match recv_timeout_error {
+                        RecvTimeoutError::Timeout => {
+                            warn!(
                                     "Transport loop got a timeout while listening for messages (Chrome #{:?})",
                                     process_id
                                 );
-                            }
-                            RecvTimeoutError::Disconnected => {
-                                error!(
-                                    "Transport loop got disconnected from WS's sender (Chrome #{:?})",
-                                    process_id
-                                );
-                            }
                         }
-                        break;
-                    }
+                        RecvTimeoutError::Disconnected => {
+                            error!(
+                                "Transport loop got disconnected from WS's sender (Chrome #{:?})",
+                                process_id
+                            );
+                            break;
+                        }
+                    },
                     Ok(message) => {
                         //                        trace!("{:?}", message);
                         match message {
