@@ -285,23 +285,21 @@ impl Browser {
                 }
 
                 match events_rx.recv_timeout(idle_browser_timeout) {
-                    Err(recv_timeout_error) => {
-                        match recv_timeout_error {
-                            RecvTimeoutError::Timeout => {
-                                error!(
-                                    "Got a timeout while listening for browser events (Chrome #{:?})",
-                                    process_id
-                                );
-                            }
-                            RecvTimeoutError::Disconnected => {
-                                debug!(
+                    Err(recv_timeout_error) => match recv_timeout_error {
+                        RecvTimeoutError::Timeout => {
+                            info!(
+                                "Got a timeout while listening for browser events (Chrome #{:?})",
+                                process_id
+                            );
+                        }
+                        RecvTimeoutError::Disconnected => {
+                            debug!(
                                     "Browser event sender disconnected while loop was waiting (Chrome #{:?})",
                                     process_id
                                 );
-                            }
+                            break;
                         }
-                        break;
-                    }
+                    },
                     Ok(event) => {
                         match event {
                             Event::TargetCreated(ev) => {
